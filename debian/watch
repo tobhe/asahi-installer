@@ -1,0 +1,7 @@
+# Compulsory line, this is a version 4 file.
+version=4
+
+# GitHub hosted projects.
+opts="filenamemangle=s%(?:.*?)?v?(@ANY_VERSION@@ARCHIVE_EXT@)%@PACKAGE@-$1%" \
+    https://github.com/AsahiLinux/asahi-installer/tags \
+    (?:.*?/)v?@ANY_VERSION@@ARCHIVE_EXT@

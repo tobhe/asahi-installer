@@ -1,4 +1,6 @@
 #!/usr/bin/make -f
 
+export PYYBUILD_NAME = asahi_firmware
+
 %:
-	dh $@ --with python3 -Dasahi_firmware
+	dh $@ --with python3 --buildsystem=pybuild

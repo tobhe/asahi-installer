@@ -1,3 +1,9 @@
+asahi-fwextract (0.6.5-1) kinetic; urgency=medium
+
+  * Update to v0.6.5 from upstream.
+
+ -- kaazoo <kaazoo@kernelpanik.net>  Mon, 25 Sep 2023 22:55:00 +0200
+
 asahi-fwextract (0.5.3-1) kinetic; urgency=medium
 
   * Initial release.

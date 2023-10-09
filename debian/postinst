@@ -3,15 +3,23 @@
 set -e
 
 extract() {
-	if [ ! -e /boot/efi/asahi/all_firmware.tar.gz ]; then
-		printf '==> No /boot/efi/asahi/all_firmware.tar.gz, skipping firmware extraction'
+	ASAHIFW="/boot/efi/asahi"
+	VENDORFW="/run/.system-efi/vendorfw"
+	VENDORFWTMP="/run/.vendorfw-tmp"
+
+	if [ ! -e "${ASAHIFW}/all_firmware.tar.gz" ]; then
+		printf "==> No ${ASAHIFW}/all_firmware.tar.gz, skipping firmware extraction"
 	fi
 	printf '==> Upgrading vendor firmware package...\n'
-	mkdir -p /run/.vendorfw-tmp
-	python3 -m asahi_firmware.update /boot/efi/asahi /run/.vendorfw-tmp
-	mv -f /run/.vendorfw-tmp/* /boot/efi/vendorfw/
+
+	asahi-fwextract "$ASAHIFW" "$VENDORFWTMP"
+	rm -rf "$VENDORFW".new
+	mv "${VENDORFWTMP}" "$VENDORFW".new
+	rm -rf "$VENDORFW"
+	mv "$VENDORFW".new "$VENDORFW"
+	rm -rf "$VENDORFWTMP"
+
 	printf '    Firmware upgraded\n'
-	update-vendor-firmware
 }
 
 case "$1" in

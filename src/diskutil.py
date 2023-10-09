@@ -147,13 +147,12 @@ class DiskUtil:
                     continue
                 break
 
-        if part.container is None:
-           part.container = {}
-           part.container["Volumes"] = []
-           logging.info(f"{part.name} doesn't have any Volumes")
-
         logging.debug(f"Partition {dev}: {part}")
         return part
+
+    def get_disk_size(self, dskname):
+        dsk = self.disk_parts[dskname]
+        return dsk["Size"]
 
     def get_disk_usable_range(self, dskname):
         # GPT overhead aligned to 4K

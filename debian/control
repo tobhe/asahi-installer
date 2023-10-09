@@ -18,7 +18,7 @@ Depends:
  ${python3:Depends},
  ${misc:Depends},
  asahi-scripts,
- lzfse
+ lzfse-bin
 Description: Asahi Linux firmware extractor
  Scripts to extract firmware blobs from an EFI partition set up by the
  Asahi Linux installer.

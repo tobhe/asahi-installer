@@ -177,6 +177,7 @@ class StubInstaller(PackageInstaller):
         logging.info(f'Using OS build {identity["Info"]["BuildNumber"]} for {self.sysinfo.device_class}')
 
         self.all_identities = manifest["BuildIdentities"]
+        self.identity = identity
         manifest["BuildIdentities"] = [identity]
 
         self.stub_info.update({
@@ -301,7 +302,7 @@ class StubInstaller(PackageInstaller):
         os.makedirs(basesystem_path, exist_ok=True)
 
         logging.info("Extracting arm64eBaseSystem.dmg")
-        self.extract_file(identity["Manifest"]["BaseSystem"]["Info"]["Path"],
+        self.copy_compress(identity["Manifest"]["BaseSystem"]["Info"]["Path"],
                           os.path.join(basesystem_path, "arm64eBaseSystem.dmg"))
         self.flush_progress()
 
@@ -348,7 +349,7 @@ class StubInstaller(PackageInstaller):
 
         os.makedirs("fud_firmware", exist_ok=True)
         copied = set()
-        for identity in self.all_identities:
+        for identity in [self.identity]:
             if (identity["Info"]["RestoreBehavior"] != "Erase" or
                 identity["Info"]["Variant"] != "macOS Customer"):
                 continue
@@ -396,6 +397,7 @@ class StubInstaller(PackageInstaller):
         subprocess.run(["tar", "czf", "all_firmware.tar.gz",
                         "fud_firmware",
                         "-C", "recovery/usr/share", "firmware",
+                        "-C", "../../usr/sbin", "appleh13camerad",
                        ], check=True)
         self.copy_idata.append(("all_firmware.tar.gz", "all_firmware.tar.gz"))
         logging.info("Detaching recovery ramdisk")

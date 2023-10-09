@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 # SPDX-License-Identifier: MIT
-import os, os.path, shlex, subprocess, sys, time, termios, json, getpass
+import os, os.path, shlex, subprocess, sys, time, termios, json, getpass, reporting
 from dataclasses import dataclass
 
 import system, osenum, stub, diskutil, osinstall, asahi_firmware, m1n1
@@ -19,7 +19,7 @@ MIN_FREE = psize("1GB")
 MIN_INSTALL_FREE = psize("10GB")
 
 MIN_MACOS_VERSION = "12.3"
-MIN_MACOS_VERSION_EXPERT = "12.1"
+MIN_MACOS_VERSION_EXPERT = "12.3"
 
 @dataclass
 class IPSW:
@@ -41,6 +41,9 @@ CHIP_MIN_VER = {
     0x6001: "12.0",     # T6001, M1 Max
     0x6002: "12.3",     # T6002, M1 Ultra
     0x8112: "12.4",     # T8112, M2
+    0x6020: "13.1",     # T6020, M2 Pro
+    0x6021: "13.1",     # T6021, M2 Max
+    0x6022: "13.4",     # T6022, M2 Ultra
 }
 
 DEVICES = {
@@ -57,23 +60,26 @@ DEVICES = {
     "j375dap":  Device("12.3", False),  # Mac Studio (M1 Ultra, 2022)
     "j413ap":   Device("12.4", False),  # MacBook Air (M2, 2022)
     "j493ap":   Device("12.4", False),  # MacBook Pro (13-inch, M2, 2022)
+    "j414cap":  Device("13.2", True),  # MacBook Pro (14-inch, M2 Max, 2023)
+    "j414sap":  Device("13.2", True),  # MacBook Pro (14-inch, M2 Pro, 2023)
+    "j416cap":  Device("13.2", True),  # MacBook Pro (16-inch, M2 Max, 2023)
+    "j416sap":  Device("13.2", True),  # MacBook Pro (16-inch, M2 Pro, 2023)
+    "j473ap":   Device("13.2", True),  # Mac mini (M2, 2023)
+    "j474sap":  Device("13.2", True),  # Mac mini (M2 Pro, 2023)
+    "j415ap":   Device("13.4", True),  # MacBook Air (15-inch, M2, 2023)
+    "j475cap":  Device("13.4", True),  # Mac Studio (M2 Max, 2023)
+    "j475dap":  Device("13.4", True),  # Mac Studio (M2 Ultra, 2023)
+    "j180dap":  Device("13.4", True),  # Mac Pro (M2 Ultra, 2023)
 }
 
 IPSW_VERSIONS = [
     # This is the special M2 version, it comes ahead so it isn't the default in expert mode
     IPSW("12.4",
          "12.1",
-         "iBoot-7459.101.3",
+         "iBoot-7459.121.3",
          "21.6.81.2.0,0",
          False,
          "https://updates.cdn-apple.com/2022SpringFCS/fullrestores/012-17781/F045A95A-44B4-4BA9-8A8A-919ECCA2BB31/UniversalMac_12.4_21F2081_Restore.ipsw"),
-    # For testing only
-    IPSW("13.0",
-         "12.1",
-         "iBoot-8419.41.10",
-         "22.1.380.0.0,0",
-         True,
-         "https://updates.cdn-apple.com/2022FallFCS/fullrestores/012-92188/2C38BCD1-2BFF-4A10-B358-94E8E28BE805/UniversalMac_13.0_22A380_Restore.ipsw"),
     IPSW("12.3.1",
          "12.1",
          "iBoot-7459.101.3",
@@ -86,10 +92,17 @@ IPSW_VERSIONS = [
          "21.5.230.0.0,0",
          False,
          "https://updates.cdn-apple.com/2022SpringFCS/fullrestores/071-08757/74A4F2A1-C747-43F9-A22A-C0AD5FB4ECB6/UniversalMac_12.3_21E230_Restore.ipsw"),
+    IPSW("13.5",
+         "13.0",
+         "iBoot-8422.141.2",
+         "22.7.74.0.0,0",
+         False,
+         "https://updates.cdn-apple.com/2023SummerFCS/fullrestores/032-69606/D3E05CDF-E105-434C-A4A1-4E3DC7668DD0/UniversalMac_13.5_22G74_Restore.ipsw"),
 ]
 
 class InstallerMain:
-    def __init__(self):
+    def __init__(self, version):
+        self.version = version
         self.data = json.load(open("installer_data.json"))
         self.credentials_validated = False
         self.expert = False
@@ -418,7 +431,8 @@ class InstallerMain:
 
         pkg = None
         if self.osins.needs_firmware:
-            pkg = asahi_firmware.core.FWPackage("firmware.tar", "firmware.cpio")
+            os.makedirs("vendorfw", exist_ok=True)
+            pkg = asahi_firmware.core.FWPackage("vendorfw")
             self.ins.collect_firmware(pkg)
             pkg.close()
             self.osins.firmware_package = pkg
@@ -429,7 +443,7 @@ class InstallerMain:
             self.ins.collect_installer_data(i)
             shutil.copy("installer.log", os.path.join(i, "installer.log"))
 
-        self.step2()
+        self.step2(report=True)
 
     def choose_ipsw(self, supported_fw=None):
         sys_iboot = split_ver(self.sysinfo.sys_firmware)
@@ -445,6 +459,8 @@ class InstallerMain:
                  and split_ver(ipsw.min_macos) <= sys_macos
                  and split_ver(ipsw.min_sfr) <= sys_sfr
                  and (not ipsw.expert_only or self.expert)]
+
+        minver.sort(key=lambda ipsw: split_ver(ipsw.version))
 
         if not avail:
             p_error("Your system firmware is too old.")
@@ -526,32 +542,21 @@ class InstallerMain:
         self.credentials_validated = True
         print()
 
-    def step2(self):
+    def step2(self, report=False):
         is_1tr = self.sysinfo.boot_mode == "one true recoveryOS"
         is_recovery = "recoveryOS" in self.sysinfo.boot_mode
         sys_ver = split_ver(self.sysinfo.macos_ver)
-        bootpicker_works = sys_ver >= (12, 3)
-        if not bootpicker_works and self.ipsw:
-            bootpicker_works = sys_ver >= split_ver(self.ipsw.min_macos)
         if is_1tr and self.ins.osi.paired:
             subprocess.run([self.ins.step2_sh], check=True)
-            self.startup_disk(recovery=True, volume_blessed=True, reboot=True)
+            self.bless()
+            self.step2_completed(report)
         elif is_recovery:
             self.set_reduced_security()
-            self.startup_disk(recovery=True, volume_blessed=True)
-            self.step2_indirect()
-        elif bootpicker_works:
-            self.startup_disk()
-            self.step2_indirect()
+            self.bless()
+            self.step2_indirect(report)
         else:
-            assert False # should never happen, we don't give users the option
-
-    def step2_1tr_direct(self):
-        self.startup_disk_recovery()
-        subprocess.run([self.ins.step2_sh], check=True)
-
-    def step2_ros_indirect(self):
-        self.startup_disk_recovery()
+            self.bless()
+            self.step2_indirect(report)
 
     def flush_input(self):
         try:
@@ -559,7 +564,7 @@ class InstallerMain:
         except:
             pass
 
-    def step2_indirect(self):
+    def install_info(self, report):
         # Hide the new volume until step2 is done
         self.ins.prepare_for_step2()
 
@@ -570,6 +575,26 @@ class InstallerMain:
         if self.osins and self.osins.efi_part:
             p_info(f"  EFI PARTUUID: {col()}{self.osins.efi_part.uuid.lower()}")
         print()
+
+        if report:
+            reporting.report(self)
+
+    def step2_completed(self, report=False):
+        self.install_info(report)
+
+        print()
+        time.sleep(2)
+        p_prompt( "Press enter to reboot the system.")
+        self.input()
+        time.sleep(1)
+        os.system("shutdown -r now")
+
+    def step2_indirect(self, report=False):
+        # Hide the new volume until step2 is done
+        self.ins.prepare_for_step2()
+
+        self.install_info(report)
+
         p_message( "To be able to boot your new OS, you will need to complete one more step.")
         p_warning( "Please read the following instructions carefully. Failure to do so")
         p_warning( "will leave your new installation in an unbootable state.")
@@ -586,7 +611,7 @@ class InstallerMain:
         p_warning( "   * It is important that the system be fully powered off before this step,")
         p_warning( "     and that you press and hold down the button once, not multiple times.")
         p_warning( "     This is required to put the machine into the right mode.")
-        p_message( "3. Release it once you see 'Entering startup options' or a spinner.")
+        p_message( "3. Release it once you see 'Loading startup options...' or a spinner.")
         p_message( "4. Wait for the volume list to appear.")
         p_message(f"5. Choose '{self.part.label}'.")
         p_message( "6. You will briefly see a 'macOS Recovery' dialog.")
@@ -606,50 +631,6 @@ class InstallerMain:
         self.input()
         time.sleep(1)
         os.system("shutdown -h now")
-
-    def startup_disk(self, recovery=False, volume_blessed=False, reboot=False):
-        if split_ver(self.sysinfo.macos_ver) >= (12, 3):
-            # Rejoice!
-            return self.bless()
-
-        print()
-        p_message(f"When the Startup Disk screen appears, choose '{self.part.label}', then click Restart.")
-        if not volume_blessed:
-            p_message( "You will have to authenticate yourself.")
-        print()
-        p_prompt( "Press enter to continue.")
-        self.input()
-
-        if recovery:
-            args = ["/System/Applications/Utilities/Startup Disk.app/Contents/MacOS/Startup Disk"]
-        else:
-            os.system("killall -9 'System Preferences' 2>/dev/null")
-            os.system("killall -9 storagekitd 2>/dev/null")
-            time.sleep(0.5)
-            args = ["sudo", "-u", self.sysinfo.login_user,
-                    "open", "-b", "com.apple.systempreferences",
-                    "/System/Library/PreferencePanes/StartupDisk.prefPane"]
-
-        sd = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if not recovery:
-            # Sometimes this doesn't open the right PrefPane and we need to do it twice (?!)
-            sd.wait()
-            time.sleep(0.5)
-            sd = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        cur_vol = self.sysinfo.default_boot
-
-        # This race is tight... I hate this.
-        if not reboot:
-            while self.sysinfo.default_boot == cur_vol:
-                self.sysinfo.get_nvram_data()
-
-            if recovery:
-                sd.kill()
-            else:
-                os.system("killall -9 StartupDiskPrefPaneService 'System Preferences' 2>/dev/null")
-                sd.wait()
-
-            print()
 
     def get_min_free_space(self, p):
         if p.os and any(os.version for os in p.os) and not self.expert:
@@ -714,12 +695,15 @@ class InstallerMain:
         p_info(   f"  Free space: {col()}{ssize(free)}")
         p_info(   f"  Available space: {col()}{ssize(avail)}")
         p_info(   f"  Overhead: {col()}{ssize(overhead)}")
-        p_info(   f"  Minimum total size: {col()}{ssize(min_size)} ({min_perc:.2f}%)")
+        p_info(   f"  Minimum new size: {col()}{ssize(min_size)} ({min_perc:.2f}%)")
         print()
-        if overhead > 1000000000:
-            p_warning("  Note: The selected partition has significant disk space overhead.")
+        if overhead > 16_000_000_000:
+            p_warning("  Warning: The selected partition has a large amount of overhead space.")
+            p_warning("  This prevents you from resizing the partition to a smaller size, even")
+            p_warning("  though macOS reports that space as free.")
+            print()
             p_message("  This is usually caused by APFS snapshots used by Time Machine, which")
-            p_message("  use up free disk space and prevent resizing the partition to a smaller")
+            p_message("  use up free disk space and block resizing the partition to a smaller")
             p_message("  size. It can also be caused by having a pending macOS upgrade.")
             print()
             p_message("  If you want to resize your partition to a smaller size, please complete")
@@ -728,6 +712,20 @@ class InstallerMain:
             print()
             p_plain( f"    {col(BLUE, BRIGHT)}https://alx.sh/tmcleanup{col()}")
             print()
+
+            if avail < 2 * PART_ALIGN:
+                p_error("  Not enough available space to resize. Please follow the instructions")
+                p_error("  above to continue.")
+                return False
+
+            if not self.yesno("Continue anyway?"):
+                return False
+            print()
+
+        if avail < 2 * PART_ALIGN:
+            p_error("Not enough available space to resize.")
+            return False
+
         p_question("Enter the new size for your existing partition:")
         p_message( "  You can enter a size such as '1GB', a fraction such as '50%',")
         p_message( "  or the word 'min' for the smallest allowable size.")
@@ -814,12 +812,15 @@ class InstallerMain:
         p_question("Press enter to continue.")
         self.input()
         print()
-        p_message("By default, this installer will hide certain advanced options that")
-        p_message("are only useful for Asahi Linux developers. You can enable expert mode")
-        p_message("to show them. Do not enable this unless you know what you are doing.")
-        p_message("Please do not file bugs if things go wrong in expert mode.")
-        self.expert = self.yesno("Enable expert mode?")
-        print()
+
+        self.expert = False
+        if os.environ.get("EXPERT", None):
+            p_message("By default, this installer will hide certain advanced options that")
+            p_message("are only useful for Asahi Linux developers. You can enable expert mode")
+            p_message("to show them. Do not enable this unless you know what you are doing.")
+            p_message("Please do not file bugs if things go wrong in expert mode.")
+            self.expert = self.yesno("Enable expert mode?")
+            print()
 
         p_progress("Collecting system information...")
         self.sysinfo = system.SystemInfo()
@@ -827,16 +828,8 @@ class InstallerMain:
         print()
         self.chip_min_ver = CHIP_MIN_VER.get(self.sysinfo.chip_id, None)
         self.device = DEVICES.get(self.sysinfo.device_class, None)
-        if not self.chip_min_ver or not self.device:
+        if not self.chip_min_ver or not self.device or (self.device.expert_only and not self.expert):
             p_error("This device is not supported yet!")
-            p_error("Please check out the Asahi Linux Blog for updates on device support:")
-            print()
-            p_error("   https://asahilinux.org/blog/")
-            print()
-            sys.exit(1)
-
-        if self.device.expert_only and not self.expert:
-            p_error("This device is in preliminary support and only available in expert mode.")
             p_error("Please check out the Asahi Linux Blog for updates on device support:")
             print()
             p_error("   https://asahilinux.org/blog/")
@@ -908,13 +901,16 @@ class InstallerMain:
                     p.desc += " (System Recovery)"
                 if p.label is not None:
                     p.desc += f" [{p.label}]"
-                vols = p.container["Volumes"]
-                p.desc += f" ({ssize(p.size)}, {len(vols)} volume{'s' if len(vols) != 1 else ''})"
-                if self.can_resize(p):
-                    parts_resizable.append(p)
+                if p.container is None:
+                    p.desc += f" (not a container)"
                 else:
-                    if p.size >= STUB_SIZE * 0.95:
-                        parts_empty_apfs.append(p)
+                    vols = p.container["Volumes"]
+                    p.desc += f" ({ssize(p.size)}, {len(vols)} volume{'s' if len(vols) != 1 else ''})"
+                    if self.can_resize(p):
+                        parts_resizable.append(p)
+                    else:
+                        if p.size >= STUB_SIZE * 0.95:
+                            parts_empty_apfs.append(p)
             else:
                 p.desc = f"{p.type} ({ssize(p.size)})"
 
@@ -1045,13 +1041,13 @@ if __name__ == "__main__":
     logging.info("Startup")
 
     logging.info("Environment:")
-    for var in ("INSTALLER_BASE", "INSTALLER_DATA", "REPO_BASE", "IPSW_BASE"):
+    for var in ("INSTALLER_BASE", "INSTALLER_DATA", "REPO_BASE", "IPSW_BASE", "EXPERT", "REPORT", "REPORT_TAG"):
         logging.info(f"  {var}={os.environ.get(var, None)}")
 
     try:
-        installer_version = open("version.tag", "r").read()
+        installer_version = open("version.tag", "r").read().strip()
         logging.info(f"Version: {installer_version}")
-        InstallerMain().main()
+        InstallerMain(installer_version).main()
     except KeyboardInterrupt:
         print()
         logging.info("KeyboardInterrupt")
